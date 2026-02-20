@@ -1,6 +1,7 @@
 /staging/
 /types/
-/dist/
+# dist/ is committed for pre-built npm consumption
+# /dist/
 /dist_type/
 /test/bench/results/
 /docs/assets/examples/*.webp
