@@ -1,0 +1,47 @@
+# MapLibre GL JS — Build & Publish Pipeline
+# Runs codegen + full build on helledi-pc (fastest iteration machine)
+# Publishes pre-built dist to GitHub for Frontend consumption
+
+name: Build MapLibre
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build/**'
+      - 'package.json'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build dist
+    runs-on: [self-hosted, helledi-pc]
+    container:
+      image: node:24-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run codegen
+        run: npm run codegen
+
+      - name: Build production
+        run: npm run build-dist
+
+      - name: Verify dist
+        run: |
+          test -f dist/maplibre-gl.js || exit 1
+          test -f dist/maplibre-gl.css || exit 1
+          test -f dist/maplibre-gl.d.ts || exit 1
+          echo "dist OK — $(du -sh dist/ | cut -f1)"
+
+      - name: Commit dist
+        run: |
+          git config user.name "Atlas"
+          git config user.email "atlas@served.dk"
+          git add dist/
+          git diff --cached --quiet || git commit -m "chore: rebuild dist [skip ci]"
+          git push origin main
