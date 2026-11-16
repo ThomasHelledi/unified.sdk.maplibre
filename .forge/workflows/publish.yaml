@@ -1,0 +1,90 @@
+# MapLibre GL JS (our fork) → @served/maplibre-gl on the Forge npm feed
+#
+# Every push to main that touches the sources builds dist/ from them (codegen + build-dist) and publishes it as
+# @served/maplibre-gl <upstream version>-served.<commits on main> — the same commit always gets the same version, and a
+# re-run of a published commit only builds. Consumers take an exact version, not a branch:
+#   "maplibre-gl": "npm:@served/maplibre-gl@5.17.0-served.<n>"   with   @served:registry=https://git.unifiedhq.ai/npm/served/
+# The feed's packages install without a token; the publish uses this job's token (packages: write).
+#
+# Runs on forge-dev (node 24 on the Unified Host runner's PATH, our own machine — not casi-build-agent).
+
+name: Publish @served/maplibre-gl
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'build/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.forge/workflows/publish.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: [self-hosted, device:forge-dev]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout
+
+      - name: Version
+        run: |
+          set -eu
+          node --version
+          UPSTREAM=$(node -p "require('./package.json').version")
+          VERSION="$UPSTREAM-served.$(git rev-list --count HEAD)"
+          echo "$VERSION" > .served-version
+          echo "@served/maplibre-gl $VERSION from $(git rev-parse --short HEAD)"
+
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Build
+        run: |
+          set -eu
+          npm run codegen
+          npm run build-dist
+          for f in maplibre-gl.js maplibre-gl.css maplibre-gl.d.ts maplibre-gl-csp.js maplibre-gl-csp-worker.js; do
+            test -s "dist/$f" || { echo "✗ dist/$f missing"; exit 1; }
+          done
+          echo "dist OK — $(du -sh dist | cut -f1)"
+
+      - name: Publish
+        run: |
+          set -eu
+          VERSION=$(cat .served-version)
+          FEED="http://10.10.10.20:30695/npm/served/"
+          if [ "$(curl -s -m 20 "${FEED}@served/maplibre-gl" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{console.log(JSON.parse(d).versions['$VERSION']?'yes':'no')}catch{console.log('no')}})")" = "yes" ]; then
+            echo "@served/maplibre-gl $VERSION is already on the feed — built only"
+            exit 0
+          fi
+          if [ "${FORGE_BRANCH:-main}" != "main" ]; then
+            echo "Branch $FORGE_BRANCH — only main publishes. Built $VERSION."
+            exit 0
+          fi
+          npm pkg set name=@served/maplibre-gl version="$VERSION"
+          # The job's token in a config of its own, never on a command line or in the log
+          NPMRC=$(mktemp); trap 'rm -f "$NPMRC"' EXIT
+          printf '%s\n' "//10.10.10.20:30695/npm/served/:_authToken=$FORGE_JOB_TOKEN" > "$NPMRC"
+          NPM_CONFIG_USERCONFIG="$NPMRC" npm publish --ignore-scripts --registry "$FEED" --tag latest
+          git checkout -- package.json
+
+      - name: Verify on the feed
+        run: |
+          set -eu
+          VERSION=$(cat .served-version)
+          URL="https://git.unifiedhq.ai/npm/served/@served/maplibre-gl"
+          curl -sf -m 30 "$URL" -o packument.json
+          node -e "
+            const d = require('./packument.json'), v = d.versions['$VERSION'];
+            if (!v) { console.error('✗ $VERSION is not on ' + '$URL'); process.exit(1); }
+            if (!v.dist.integrity || !Object.keys(v.dependencies || {}).length) { console.error('✗ no integrity or dependencies'); process.exit(1); }
+            console.log('✓ @served/maplibre-gl $VERSION — ' + Object.keys(v.dependencies).length + ' dependencies, latest ' + d['dist-tags'].latest);
+          "
+          rm -f packument.json .served-version
